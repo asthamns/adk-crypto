@@ -2,4 +2,4 @@
 # It should import the agent instance to make it discoverable.
 
 # Import the agent instance (using conventional 'root_agent' name)
-from .agent import agent 
+from .agent import root_agent 

@@ -1,124 +1,407 @@
-import random
 import os
+import random
+import re
+import traceback
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 
-from google.adk.agents import Agent
-
+import nltk
+import praw
+import requests
+import tweepy
 from dotenv import load_dotenv
+from google.adk.agents import Agent
+from google.adk.tools import BaseTool as Tool
+from nltk import word_tokenize
+from nltk.corpus import stopwords
+from nltk.probability import FreqDist
+from praw.exceptions import PRAWException
+from textblob import TextBlob
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from pathlib import Path
+
+# --- NLTK Data Path and Downloader Configuration ---
+# This ensures the required NLTK data is available and in the correct location.
+nltk_data_path = str(Path.home() / "nltk_data")
+if nltk_data_path not in nltk.data.path:
+    nltk.data.path.append(nltk_data_path)
+
+# Define the list of packages to ensure are downloaded
+required_packages = ["punkt", "stopwords", "punkt_tab"]
+
+for package in required_packages:
+    try:
+        # The resource names can sometimes differ from package names
+        # We'll try to find common resource paths.
+        if package == "punkt" or package == "punkt_tab":
+             nltk.data.find(f"tokenizers/{package}")
+        else:
+             nltk.data.find(f"corpora/{package}")
+    except LookupError:
+        print(f"--- NLTK package '{package}' not found. Downloading... ---")
+        nltk.download(package, download_dir=nltk_data_path)
+# --- End NLTK Configuration ---
+
+# Load environment variables from .env file
 load_dotenv()
 
-import praw
-from praw.exceptions import PRAWException
 
+# ------------------------------------------------------------------------------
+# Reddit Tools
+# ------------------------------------------------------------------------------
 def get_reddit_gamedev_news(subreddit: str, limit: int = 5) -> dict[str, list[str]]:
-    """
-    Fetches top post titles from a specified subreddit using the Reddit API.
-
-    Args:
-        subreddit: The name of the subreddit to fetch news from (e.g., 'gamedev').
-        limit: The maximum number of top posts to fetch.
-
-    Returns:
-        A dictionary with the subreddit name as key and a list of
-        post titles as value. Returns an error message if credentials are
-        missing, the subreddit is invalid, or an API error occurs.
-    """
-    print(f"--- Tool called: Fetching from r/{subreddit} via Reddit API ---")
+    """Fetches top post titles from a specified subreddit."""
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
     user_agent = os.getenv("REDDIT_USER_AGENT")
 
     if not all([client_id, client_secret, user_agent]):
-        print("--- Tool error: Reddit API credentials missing in .env file. ---")
         return {subreddit: ["Error: Reddit API credentials not configured."]}
 
     try:
         reddit = praw.Reddit(
-            client_id=client_id,
-            client_secret=client_secret,
-            user_agent=user_agent,
+            client_id=client_id, client_secret=client_secret, user_agent=user_agent
         )
-        # Check if subreddit exists and is accessible
-        reddit.subreddits.search_by_name(subreddit, exact=True)
         sub = reddit.subreddit(subreddit)
-        top_posts = list(sub.hot(limit=limit)) # Fetch hot posts
-        titles = [post.title for post in top_posts]
-        if not titles:
-             return {subreddit: [f"No recent hot posts found in r/{subreddit}."]}
-        return {subreddit: titles}
+        titles = [post.title for post in sub.hot(limit=limit)]
+        return {subreddit: titles or [f"No recent hot posts found in r/{subreddit}."]}
     except PRAWException as e:
-        print(f"--- Tool error: Reddit API error for r/{subreddit}: {e} ---")
-        # More specific error handling could be added here (e.g., 404 for invalid sub)
-        return {subreddit: [f"Error accessing r/{subreddit}. It might be private, banned, or non-existent. Details: {e}"]}
-    except Exception as e: # Catch other potential errors
-        print(f"--- Tool error: Unexpected error for r/{subreddit}: {e} ---")
-        return {subreddit: [f"An unexpected error occurred while fetching from r/{subreddit}."]}
+        return {
+            subreddit: [
+                f"Error accessing r/{subreddit}. It may be private or non-existent. Details: {e}"
+            ]
+        }
+    except Exception as e:
+        return {subreddit: [f"An unexpected error occurred: {e}"]}
 
-def get_mock_reddit_gamedev_news(subreddit: str) -> dict[str, list[str]]:
+
+# ------------------------------------------------------------------------------
+# CoinGecko Tools
+# ------------------------------------------------------------------------------
+def search_coin_id(query: str) -> Optional[str]:
+    """Searches CoinGecko for a coin ID."""
+    api_key = os.getenv("COINGECKO_API_KEY")
+    url = "https://pro-api.coingecko.com/api/v3/search"
+    headers = {"x-cg-pro-api-key": api_key} if api_key else {}
+    try:
+        response = requests.get(url, params={"query": query}, headers=headers)
+        response.raise_for_status()
+        coins = response.json().get("coins", [])
+        return coins[0]["id"] if coins else None
+    except Exception:
+        return None
+
+
+def get_coin_details(coin_id: str) -> dict:
     """
-    Simulates fetching top post titles from a game development subreddit.
+    Fetches detailed cryptocurrency data from CoinGecko. It determines if the
+    asset is a native currency or a token with a contract address on a supported
+    chain.
 
     Args:
-        subreddit: The name of the subreddit to fetch news from (e.g., 'gamedev').
+        coin_id: The official CoinGecko ID of the cryptocurrency.
 
     Returns:
-        A dictionary with the subreddit name as key and a list of
-        mock post titles as value. Returns a message if the subreddit is unknown.
+        A dictionary detailing market data and asset type (native or token).
     """
-    print(f"--- Tool called: Simulating fetch from r/{subreddit} ---")
-    mock_titles: dict[str, list[str]] = {
-        "gamedev": [
-            "Show HN: My new procedural level generator using Rust",
-            "Unity releases update 2023.3 LTS - Key features discussion",
-            "Best practices for optimizing physics in networked multiplayer games",
-            "Debate: Is ECS the future for all game engines? Performance comparison.",
-            "Looking for constructive feedback on my indie game's pixel art style",
-            "How to get started with Godot 4.2 GDScript",
-            "Unreal Engine 5.4 Nanite & Lumen deep dive",
-        ],
-        "unrealengine": [
-            "Unreal Engine 5.4 Performance Guide for large open worlds",
-            "How to implement advanced Niagara particle effects for magic spells",
-            "MetaHumans Animator tutorial: Lip sync and facial expressions",
-            "Showcase: Sci-Fi cinematic created entirely in UE5",
-            "Troubleshooting Lumen global illumination artifacts in indoor scenes",
-            "Marketplace highlight: Advanced locomotion system",
-            "Tips for migrating projects from UE4 to UE5",
-        ],
-        "unity3d": [
-            "Best practices for mobile game optimization in Unity 2023 LTS",
-            "Understanding Unity's Data-Oriented Technology Stack (DOTS) and Burst Compiler",
-            "Tutorial: Creating custom PBR shaders with Unity Shader Graph",
-            "Top free assets from the Unity Asset Store this month",
-            "Migrating project from URP to HDRP - Common pitfalls and solutions",
-            "Introduction to Unity Muse for texture generation",
-            "Networking in Unity: Netcode for GameObjects vs Photon PUN",
+    if not coin_id:
+        return {
+            "status": "error",
+            "result": "Lame. You forgot the coin_id. Can't do much without that.",
+        }
+
+    api_key = os.getenv("COINGECKO_API_KEY")
+    headers = {"x-cg-pro-api-key": api_key} if api_key else {}
+    base_url = (
+        "https://pro-api.coingecko.com/api/v3"
+        if api_key
+        else "https://api.coingecko.com/api/v3"
+    )
+    url = f"{base_url}/coins/{coin_id}"
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+
+        market_data = data.get("market_data", {})
+        current_price = market_data.get("current_price", {}).get("usd", "N/A")
+        market_cap = market_data.get("market_cap", {}).get("usd", "N/A")
+        total_volume = market_data.get("total_volume", {}).get("usd", "N/A")
+        high_24h = market_data.get("high_24h", {}).get("usd", "N/A")
+        low_24h = market_data.get("low_24h", {}).get("usd", "N/A")
+
+        # Determine asset type
+        asset_platform_id = data.get("asset_platform_id")
+        is_native = not asset_platform_id and data.get("id") in [
+            "solana",
+            "ethereum",
+            "binancecoin",
+            "avalanche-2",
         ]
-    }
-    # Normalize subreddit name for lookup
-    normalized_subreddit = subreddit.lower()
+        
+        found_chain = None
+        contract_address = None
+        
+        if is_native:
+            found_chain = data.get("id")
+        else:
+            supported_chains = ["solana", "ethereum", "arbitrum", "polygon", "avalanche", "base", "bnb"]
+            platforms = data.get("platforms", {})
+            for chain in supported_chains:
+                if platforms.get(chain):
+                    found_chain = chain
+                    contract_address = platforms[chain]
+                    break
+        
+        result_summary = (
+            f"Okay, here's the tea on {data.get('name', 'this coin')}. "
+            f"Right now, it's trading at ${current_price:,.2f}. "
+            f"Total market cap is a hefty ${market_cap:,.0f}."
+        )
 
-    if normalized_subreddit in mock_titles:
-        available_titles = mock_titles[normalized_subreddit]
-        # Return a random subset to make it seem dynamic
-        num_to_return = min(len(available_titles), 3) # Return up to 3 random titles
-        selected_titles = random.sample(available_titles, num_to_return)
-        return {subreddit: selected_titles}
-    else:
-        print(f"--- Tool warning: Unknown subreddit '{subreddit}' requested. ---")
-        return {subreddit: [f"Sorry, I don't have mock data for r/{subreddit}."]}
+        return {
+            "status": "success",
+            "coin_id": coin_id,
+            "is_native_asset": is_native,
+            "chain": found_chain,
+            "contract_address": contract_address,
+            "result": result_summary,
+        }
 
-# Define the Agent
-agent = Agent(
-    name="reddit_scout_agent",
-    description="A Reddit scout agent that searches for the most relevant posts in a given subreddit",
+    except requests.exceptions.HTTPError as e:
+        return {"status": "error", "result": f"CoinGecko API error: {e.response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "result": f"Network error: {e}"}
+
+
+# ------------------------------------------------------------------------------
+# Twitter/X Tools
+# ------------------------------------------------------------------------------
+def get_twitter_client():
+    """Initializes and returns a Tweepy client."""
+    api_key = os.getenv("TWITTER_API_KEY")
+    api_secret = os.getenv("TWITTER_API_SECRET")
+    bearer_token = os.getenv("TWITTER_BEARER_TOKEN")
+    if not all([api_key, api_secret, bearer_token]):
+        return None
+    try:
+        return tweepy.Client(
+            bearer_token=bearer_token,
+            consumer_key=api_key,
+            consumer_secret=api_secret,
+            wait_on_rate_limit=True,
+        )
+    except Exception:
+        return None
+
+
+def get_crypto_community_insights(
+    coin_name: str, coin_symbol: Optional[str] = None
+) -> dict:
+    """Provides a summary of community sentiment on Twitter."""
+    client = get_twitter_client()
+    if not client:
+        return {
+            "status": "error",
+            "result": "Could not initialize Twitter client. Please check API credentials.",
+        }
+
+    query = f'"{coin_name}" OR "{coin_symbol}"' if coin_symbol else f'"{coin_name}"'
+    query += " lang:en -is:retweet"
+
+    try:
+        response = client.search_recent_tweets(
+            query, tweet_fields=["text"], max_results=100
+        )
+        tweets = response.data
+        if not tweets:
+            return {
+                "status": "no_data",
+                "result": "No recent community discussion found on Twitter for this coin.",
+            }
+
+        text = " ".join([tweet.text for tweet in tweets])
+        analyzer = SentimentIntensityAnalyzer()
+        sentiment = analyzer.polarity_scores(text)["compound"]
+        assessment = (
+            "Positive" if sentiment >= 0.05 else "Negative" if sentiment <= -0.05 else "Neutral"
+        )
+        
+        stop_words = set(stopwords.words("english"))
+        words = [w.lower() for w in word_tokenize(text) if w.isalpha() and w.lower() not in stop_words]
+        themes = ", ".join([w for w, _ in FreqDist(words).most_common(5)])
+        themes_summary = f"Key discussion themes: {themes}." if themes else ""
+
+        return {
+            "status": "success",
+            "result": f"Overall sentiment is {assessment}. {themes_summary}",
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "result": f"An unexpected error occurred. Details: {traceback.format_exc()}",
+        }
+
+
+def get_crypto_rumors_and_news(
+    coin_name: str, coin_symbol: Optional[str] = None
+) -> dict:
+    """Looks for rumors and breaking news on Twitter."""
+    client = get_twitter_client()
+    if not client:
+        return {
+            "status": "error",
+            "result": "Could not initialize Twitter client. Please check API credentials.",
+        }
+    
+    q_part = f'"{coin_name}" OR "{coin_symbol}"' if coin_symbol else f'"{coin_name}"'
+    query = f"({q_part}) (rumor OR news OR announcement OR leak OR speculation) lang:en -is:retweet"
+
+    try:
+        tweets = client.search_recent_tweets(query=query, max_results=10, tweet_fields=["text"])
+        if not tweets.data:
+            return {
+                "status": "no_data",
+                "result": f"Couldn't find any recent rumors or news about {coin_name}.",
+            }
+        
+        summary = "Found some chatter. Here's a top tweet: " + tweets.data[0].text
+        return {"status": "success", "result": summary}
+    except Exception:
+        return {
+            "status": "error",
+            "result": f"An unexpected error occurred. Details: {traceback.format_exc()}",
+        }
+
+
+# ------------------------------------------------------------------------------
+# Nansen Tools
+# ------------------------------------------------------------------------------
+def get_token_smart_money_flow(chain: str, token_address: str) -> dict:
+    """
+    Fetches smart money flow data from Nansen for a specific TOKEN.
+    This tool is only for tokens with a contract address.
+
+    Args:
+        chain: The blockchain name (e.g., 'solana').
+        token_address: The token's contract address.
+
+    Returns:
+        A dictionary with a summary of smart money inflows/outflows.
+    """
+    if not all([chain, token_address]):
+        return {"status": "error", "result": "Missing chain or token address."}
+
+    api_key = os.getenv("NANSEN_API_KEY")
+    if not api_key:
+        return {"status": "error", "result": "Nansen API key is missing."}
+
+    url = f"https://api.nansen.ai/api/v2/token-god-mode/{chain.lower()}/{token_address}/flows"
+    headers = {"apiKey": api_key}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        sm_data = data.get("smart_money")
+        if not sm_data:
+            return {"status": "success", "result": "No specific smart money data found for this token."}
+
+        inflow_24h = sm_data.get("inflow", {}).get("24h_usd", 0)
+        outflow_24h = sm_data.get("outflow", {}).get("24h_usd", 0)
+        netflow_24h = inflow_24h - outflow_24h
+
+        summary = (
+            f"For this token, the 24-hour smart money net flow is ${netflow_24h:,.2f} "
+            f"(${inflow_24h:,.2f} in vs ${outflow_24h:,.2f} out)."
+        )
+        return {"status": "success", "result": summary}
+    except requests.exceptions.HTTPError as e:
+        return {"status": "error", "result": f"Nansen API returned an error: {e.response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
+
+def get_native_asset_smart_money_flow(chain: str) -> dict:
+    """
+    Fetches smart money flow data from Nansen for a NATIVE asset (e.g., SOL, ETH).
+
+    Args:
+        chain: The blockchain name (e.g., 'solana', 'ethereum').
+
+    Returns:
+        A dictionary with a summary of smart money inflows/outflows for the chain.
+    """
+    if not chain:
+        return {"status": "error", "result": "Missing chain name."}
+        
+    api_key = os.getenv("NANSEN_API_KEY")
+    if not api_key:
+        return {"status": "error", "result": "Nansen API key is missing."}
+
+    url = f"https://api.nansen.ai/api/v1/smart-money-token-flows/{chain.lower()}"
+    headers = {"apiKey": api_key}
+    params = {"limit": 1}
+
+    try:
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if not data:
+            return {"status": "success", "result": f"No chain-level smart money data found for {chain.upper()}."}
+        
+        sm_data = data[0]
+        inflow_24h = sm_data.get("inflow_24h_usd", 0)
+        outflow_24h = sm_data.get("outflow_24h_usd", 0)
+        netflow_24h = inflow_24h - outflow_24h
+
+        summary = (
+            f"For native {chain.upper()}, the 24-hour smart money net flow is ${netflow_24h:,.2f} "
+            f"(${inflow_24h:,.2f} in vs ${outflow_24h:,.2f} out)."
+        )
+        return {"status": "success", "result": summary}
+    except requests.exceptions.HTTPError as e:
+        return {"status": "error", "result": f"Nansen API returned an error: {e.response.status_code}"}
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
+
+
+# ------------------------------------------------------------------------------
+# Agent Definition
+# ------------------------------------------------------------------------------
+class RedditScout(Agent):
+    """A scout that that can get posts from subreddits."""
+
+    def __init__(self, **kwargs):
+        super().__init__(
+            name="reddit_scout",
+            description="A crypto research assistant that combines market data with social media analysis and smart money insights.",
     model="gemini-1.5-flash-latest",
-    instruction=(
-        "You are the Game Dev News Scout. Your primary task is to fetch and summarize game development news."
-        "1. **Identify Intent:** Determine if the user is asking for game development news or related topics."
-        "2. **Determine Subreddit:** Identify which subreddit(s) to check. Use 'gamedev' by default if none are specified. Use the specific subreddit(s) if mentioned (e.g., 'unity3d', 'unrealengine')."
-        "3. **Synthesize Output:** Take the exact list of titles returned by the tool."
-        "4. **Format Response:** Present the information as a concise, bulleted list. Clearly state which subreddit(s) the information came from. If the tool indicates an error or an unknown subreddit, report that message directly."
-        "5. **MUST CALL TOOL:** You **MUST** call the `get_reddit_gamedev_news` tool with the identified subreddit(s). Do NOT generate summaries without calling the tool first."
-    ),
-    tools=[get_reddit_gamedev_news],
+            instruction="""
+You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident and you ALWAYS back up your sass with hard data. Follow this workflow precisely.
+
+1.  **Get Coin ID**: Use `search_coin_id` to get the CoinGecko ID.
+
+2.  **Get Coin Details**: Use `get_coin_details` with the ID. This will tell you if it's a native asset or a token.
+
+3.  **Get Smart Money Flow**:
+    *   If `is_native_asset` was true, call `get_native_asset_smart_money_flow` using the `chain` from the previous step.
+    *   If `is_native_asset` was false and you have a `contract_address`, call `get_token_smart_money_flow` with the `chain` and `contract_address`.
+    *   If you couldn't get smart money data for any reason, just move on.
+
+4.  **Get Social Sentiment**: Use `get_crypto_community_insights`.
+
+5.  **Synthesize Report**: Combine the results from all tools into a final summary. Give your take on what the data means in your signature style.
+""",
+    tools=[
+                search_coin_id,
+        get_coin_details,
+                get_crypto_community_insights,
+                get_token_smart_money_flow,
+                get_native_asset_smart_money_flow,
+    ],
+            **kwargs,
 )
+
+root_agent = RedditScout()
+agent = root_agent  # Compatibility alias

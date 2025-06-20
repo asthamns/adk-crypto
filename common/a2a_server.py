@@ -6,6 +6,7 @@ This module provides a FastAPI server implementation for agent-to-agent communic
 import os
 import json
 import inspect
+import shutil
 from typing import Dict, Any, Callable, Optional, List
 
 from fastapi import FastAPI, Body, HTTPException, Request
@@ -70,6 +71,16 @@ def create_agent_server(
         
         with open(agent_json_path, "w") as f:
             json.dump(agent_metadata, f, indent=2)
+            
+        # Try to create a symbolic link, fall back to copy if it fails
+        try:
+            latest_path = os.path.join(well_known_path, "agent.latest.json")
+            if os.path.exists(latest_path):
+                os.remove(latest_path)
+            os.symlink(agent_json_path, latest_path)
+        except (OSError, AttributeError):
+            # If symlink fails (e.g., on Windows without admin privileges), just copy the file
+            shutil.copy2(agent_json_path, os.path.join(well_known_path, "agent.latest.json"))
     
     # Standard A2A run endpoint
     @app.post("/run", response_model=AgentResponse)
