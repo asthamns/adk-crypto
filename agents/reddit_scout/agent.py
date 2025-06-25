@@ -20,6 +20,7 @@ from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pathlib import Path
 import time
+import google.generativeai as genai
 
 # Use local nltk_data directory for cloud compatibilityyy
 nltk_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nltk_data'))
@@ -396,32 +397,69 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
 
     async def process_task(self, message, context=None, session_id=None):
         """
-        Process a user message and return a crypto market analysis.
+        Use Gemini LLM to interpret the user message, orchestrate tool calls, and synthesize a final answer.
         """
-        coin_id = search_coin_id(message)
-        if not coin_id:
-            return {"message": f"Sorry, I couldn't find a coin matching '{message}'.", "status": "error"}
+        import json
+        import os
+        import inspect
 
-        coin_details = get_coin_details(coin_id)
-        if coin_details.get("status") != "success":
-            return {"message": f"Couldn't fetch details for '{message}'.", "status": "error"}
+        # Set up Gemini
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return {"message": "Gemini API key not set. Please set GOOGLE_API_KEY.", "status": "error"}
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(self.model)
 
-        # Smart money flow
-        if coin_details.get("is_native_asset"):
-            flow = get_native_asset_smart_money_flow(coin_details.get("chain"))
-        else:
-            flow = get_token_smart_money_flow(coin_details.get("chain"), coin_details.get("contract_address"))
+        # Prepare tool descriptions
+        tool_map = {
+            "search_coin_id": search_coin_id,
+            "get_coin_details": get_coin_details,
+            "get_crypto_community_insights": get_crypto_community_insights,
+            "get_token_smart_money_flow": get_token_smart_money_flow,
+            "get_native_asset_smart_money_flow": get_native_asset_smart_money_flow,
+        }
+        tool_desc = "\n".join([
+            f"- {name}: {inspect.getdoc(fn) or ''}" for name, fn in tool_map.items()
+        ])
 
-        # Social sentiment
-        sentiment = get_crypto_community_insights(coin_details.get("coin_id"), message)
+        # Compose the prompt
+        prompt = f"""
+{self.instruction}
 
-        # Synthesize a report
-        report = (
-            f"{coin_details.get('result')}\n"
-            f"{flow.get('result')}\n"
-            f"Social sentiment: {sentiment.get('result')}"
-        )
-        return {"message": report, "status": "success"}
+Available tools:
+{tool_desc}
+
+User message: {message}
+
+If you need to call a tool, respond with JSON: {{"tool": "tool_name", "args": {{...}}}}
+If you have a final answer, respond with JSON: {{"answer": "your answer here"}}
+"""
+
+        conversation = []
+        for _ in range(5):  # Limit to 5 tool calls to avoid infinite loops
+            response = model.generate_content(prompt)
+            try:
+                content = response.text.strip()
+                data = json.loads(content)
+            except Exception:
+                return {"message": f"LLM returned non-JSON: {content}", "status": "error"}
+            if "answer" in data:
+                return {"message": data["answer"], "status": "success"}
+            elif "tool" in data:
+                tool_name = data["tool"]
+                args = data.get("args", {})
+                tool_fn = tool_map.get(tool_name)
+                if not tool_fn:
+                    return {"message": f"Unknown tool: {tool_name}", "status": "error"}
+                try:
+                    tool_result = tool_fn(**args)
+                except Exception as e:
+                    tool_result = {"status": "error", "result": str(e)}
+                # Add tool result to prompt for next round
+                prompt += f"\nTool {tool_name}({args}) returned: {tool_result}"
+            else:
+                return {"message": f"LLM returned unexpected JSON: {data}", "status": "error"}
+        return {"message": "Too many tool calls, aborting.", "status": "error"}
 
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
