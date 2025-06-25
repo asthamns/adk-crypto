@@ -394,5 +394,34 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
             **kwargs,
         )
 
+    async def process_task(self, message, context=None, session_id=None):
+        """
+        Process a user message and return a crypto market analysis.
+        """
+        coin_id = search_coin_id(message)
+        if not coin_id:
+            return {"message": f"Sorry, I couldn't find a coin matching '{message}'.", "status": "error"}
+
+        coin_details = get_coin_details(coin_id)
+        if coin_details.get("status") != "success":
+            return {"message": f"Couldn't fetch details for '{message}'.", "status": "error"}
+
+        # Smart money flow
+        if coin_details.get("is_native_asset"):
+            flow = get_native_asset_smart_money_flow(coin_details.get("chain"))
+        else:
+            flow = get_token_smart_money_flow(coin_details.get("chain"), coin_details.get("contract_address"))
+
+        # Social sentiment
+        sentiment = get_crypto_community_insights(coin_details.get("coin_id"), message)
+
+        # Synthesize a report
+        report = (
+            f"{coin_details.get('result')}\n"
+            f"{flow.get('result')}\n"
+            f"Social sentiment: {sentiment.get('result')}"
+        )
+        return {"message": report, "status": "success"}
+
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
