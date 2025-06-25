@@ -58,7 +58,7 @@ st.set_page_config(
 )
 
 # Constants
-DEFAULT_API_BASE_URL = "http://localhost:8000"
+DEFAULT_API_BASE_URL = "https://nadk-1.onrender.com"
 
 # Available agents configuration
 AVAILABLE_AGENTS = {
