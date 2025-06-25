@@ -21,6 +21,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pathlib import Path
 import time
 import google.generativeai as genai
+import json
 
 # Use local nltk_data directory for cloud compatibilityyy
 nltk_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nltk_data'))
@@ -449,7 +450,8 @@ IMPORTANT:
                 # Fallback: treat any plain text as a final answer
                 return {"message": response.text.strip(), "status": "success"}
             if "answer" in data:
-                return {"message": data["answer"], "status": "success"}
+                final_message = extract_answer(data["answer"])
+                return {"message": final_message, "status": "success"}
             elif "tool" in data:
                 tool_name = data["tool"]
                 args = data.get("args", {})
@@ -465,6 +467,20 @@ IMPORTANT:
             else:
                 return {"message": f"LLM returned unexpected JSON: {data}", "status": "error"}
         return {"message": "Too many tool calls, aborting.", "status": "error"}
+
+def extract_answer(text):
+    # If the response is JSON, extract the answer field
+    match = re.search(r'\{\s*"answer"\s*:\s*"(.*?)"\s*\}', text, re.DOTALL)
+    if match:
+        return match.group(1).replace('\\n', '\n')
+    # If the response is a JSON string, try to parse it
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and 'answer' in data:
+            return data['answer']
+    except Exception:
+        pass
+    return text
 
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
