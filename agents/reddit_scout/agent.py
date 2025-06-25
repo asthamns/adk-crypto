@@ -469,17 +469,23 @@ IMPORTANT:
         return {"message": "Too many tool calls, aborting.", "status": "error"}
 
 def extract_answer(text):
-    # If the response is JSON, extract the answer field
-    match = re.search(r'\{\s*"answer"\s*:\s*"(.*?)"\s*\}', text, re.DOTALL)
-    if match:
-        return match.group(1).replace('\\n', '\n')
-    # If the response is a JSON string, try to parse it
+    import json
+    import re
+    # Remove leading 'json' if present
+    if text.strip().lower().startswith('json'):
+        text = text.strip()[4:].strip()
+    # Try to parse as JSON
     try:
         data = json.loads(text)
         if isinstance(data, dict) and 'answer' in data:
             return data['answer']
     except Exception:
         pass
+    # Try to extract with regex
+    match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
+    if match:
+        return match.group(1).replace('\\n', '\n')
+    # Fallback: return the text as is
     return text
 
 root_agent = RedditScout()
