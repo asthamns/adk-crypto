@@ -460,8 +460,8 @@ IMPORTANT:
                 content = response.text.strip()
                 data = json.loads(content)
             except Exception:
-                # Fallback: treat any plain text as a final answer
-                return {"message": response.text.strip(), "status": "success"}
+                final_message = extract_answer(response.text.strip())
+                return {"message": final_message, "status": "success"}
             if "answer" in data:
                 final_message = extract_answer(data["answer"])
                 return {"message": final_message, "status": "success"}
@@ -471,11 +471,25 @@ IMPORTANT:
                 tool_fn = tool_map.get(tool_name)
                 if not tool_fn:
                     return {"message": f"Unknown tool: {tool_name}", "status": "error"}
+                # --- AUTO-FILL FOR NANSEN TOOLS ---
+                if tool_name in ["get_token_smart_money_flow", "get_native_asset_smart_money_flow"]:
+                    # If missing chain or token_address, try to look up from CoinGecko
+                    if "chain" not in args or not args.get("chain") or (tool_name == "get_token_smart_money_flow" and ("token_address" not in args or not args.get("token_address"))):
+                        # Try to get coin_id from previous context or message
+                        coin_id = None
+                        if "coin_id" in args and args["coin_id"]:
+                            coin_id = args["coin_id"]
+                        else:
+                            coin_id = search_coin_id(message)
+                        coin_details = get_coin_details(coin_id) if coin_id else {}
+                        if "chain" not in args or not args.get("chain"):
+                            args["chain"] = coin_details.get("chain")
+                        if tool_name == "get_token_smart_money_flow" and ("token_address" not in args or not args.get("token_address")):
+                            args["token_address"] = coin_details.get("contract_address")
                 try:
                     tool_result = tool_fn(**args)
                 except Exception as e:
                     tool_result = {"status": "error", "result": str(e)}
-                # Add tool result to prompt for next round
                 prompt += f"\nTool {tool_name}({args}) returned: {tool_result}"
             else:
                 return {"message": f"LLM returned unexpected JSON: {data}", "status": "error"}
@@ -498,8 +512,8 @@ def extract_answer(text):
     match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
     if match:
         return match.group(1).replace('\\n', '\n')
-    # Fallback: return the text as is
-    return text
+    # Fallback: return the text as is, but strip leading/trailing braces and whitespace
+    return text.strip().lstrip('{').rstrip('}').strip()
 
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
