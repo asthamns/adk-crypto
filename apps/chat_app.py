@@ -277,7 +277,9 @@ with st.sidebar:
     else:
         st.warning("No active session")
         if st.button("➕ Create Session"):
-            create_session(selected_agent_id)
+            st.session_state.session_id = f"session-{int(time.time())}"
+            st.session_state.selected_agent = selected_agent_id
+            st.session_state.messages = []
             st.rerun()
     
     st.divider()
