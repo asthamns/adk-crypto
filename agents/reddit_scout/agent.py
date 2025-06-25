@@ -101,7 +101,13 @@ def search_coin_id(query: str) -> Optional[str]:
         coins = response.json().get("coins", [])
 
         if not coins:
-            return None
+            # Fallback: suggest similar coins
+            similar = response.json().get("coins", [])
+            suggestions = ', '.join([c.get('symbol', '') for c in similar][:5])
+            msg = f"Sorry, I couldn't find a coin matching '{query}'."
+            if suggestions:
+                msg += f" Did you mean: {suggestions}?"
+            raise ValueError(msg)
 
         # Look for an exact symbol match first
         query_lower = query.lower()
@@ -117,6 +123,9 @@ def search_coin_id(query: str) -> Optional[str]:
         return None
     except requests.exceptions.RequestException as e:
         return None
+    except ValueError as ve:
+        # Used for fallback suggestions
+        return str(ve)
 
 
 def get_coin_details(coin_id: str) -> dict:
@@ -436,7 +445,7 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
             f"- {name}: {inspect.getdoc(fn) or ''}" for name, fn in tool_map.items()
         ])
 
-        # Compose the prompt (stronger JSON instructions)
+        # Compose the prompt (add more examples for LLM)
         prompt = f"""
 {self.instruction}
 
@@ -451,8 +460,23 @@ IMPORTANT:
 - If you have a final answer, respond with: {{"answer": "your answer here"}}
 - Never reply with plain text or any other format.
 - If you don't know the answer, still respond with {{"answer": "Sorry, I don't know."}}
-"""
 
+EXAMPLES:
+User: "Tell me about ETH"
+Response: {{"tool": "search_coin_id", "args": {{"query": "ETH"}}}}
+
+User: "Show me smart money flow for Solana"
+Response: {{"tool": "get_native_asset_smart_money_flow", "args": {{"chain": "solana"}}}}
+
+User: "What's the sentiment on Bitcoin?"
+Response: {{"tool": "get_crypto_community_insights", "args": {{"coin_name": "bitcoin"}}}}
+
+User: "Give me the details for USDT"
+Response: {{"tool": "get_coin_details", "args": {{"coin_id": "tether"}}}}
+
+User: "I want to know about a coin that doesn't exist"
+Response: {{"answer": "Sorry, I couldn't find a coin matching your query. Try using the coin's symbol (e.g., ETH, BTC) or full name."}}
+"""
         conversation = []
         for _ in range(5):  # Limit to 5 tool calls to avoid infinite loops
             response = model.generate_content(prompt)
