@@ -21,7 +21,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pathlib import Path
 import time
 
-# Use local nltk_data directory for cloud compatibility
+# Use local nltk_data directory for cloud compatibilityyy
 nltk_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nltk_data'))
 if nltk_data_path not in nltk.data.path:
     nltk.data.path.append(nltk_data_path)
