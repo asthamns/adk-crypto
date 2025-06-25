@@ -229,8 +229,10 @@ def get_crypto_community_insights(
     coin_name: str, coin_symbol: Optional[str] = None
 ) -> dict:
     """Provides a summary of community sentiment on Twitter."""
+    print(f"[DEBUG] Sentiment called with coin_name={coin_name}, coin_symbol={coin_symbol}")
     client = get_twitter_client()
     if not client:
+        print("[ERROR] Could not initialize Twitter client. Check API credentials.")
         return {
             "status": "error",
             "result": "Could not initialize Twitter client. Please check API credentials.",
@@ -238,12 +240,14 @@ def get_crypto_community_insights(
 
     query = f'"{coin_name}" OR "{coin_symbol}"' if coin_symbol else f'"{coin_name}"'
     query += " lang:en -is:retweet"
+    print(f"[DEBUG] Twitter query: {query}")
 
     try:
         response = client.search_recent_tweets(
             query, tweet_fields=["text"], max_results=100
         )
         tweets = response.data
+        print(f"[DEBUG] Twitter response: {tweets}")
         if not tweets:
             return {
                 "status": "no_data",
@@ -267,6 +271,7 @@ def get_crypto_community_insights(
             "result": f"Overall sentiment is {assessment}. {themes_summary}",
         }
     except Exception as e:
+        print(f"[ERROR] Twitter sentiment error: {e}")
         return {
             "status": "error",
             "result": f"An unexpected error occurred. Details: {traceback.format_exc()}",
@@ -309,21 +314,28 @@ def get_crypto_rumors_and_news(
 # ------------------------------------------------------------------------------
 def get_nansen_smart_money_flows(chain: str, token_address: str) -> dict:
     api_key = os.getenv("NANSEN_API_KEY")
+    print(f"[DEBUG] Nansen called with chain={chain}, token_address={token_address}, api_key={'set' if api_key else 'missing'}")
+    if not api_key:
+        print("[ERROR] Nansen API key not set.")
+        return {"status": "error", "result": "Nansen API key not set."}
     url = "https://api.nansen.ai/api/beta/tgm/flow-intelligence"
     headers = {"apiKey": api_key, "Content-Type": "application/json"}
     flows = {}
     for label, timeframe in [("24H", "1d"), ("7D", "7d"), ("30D", "30d")]:
         payload = {
             "parameters": {
-                "chain": chain.lower(),
+                "chain": chain.lower() if chain else None,
                 "tokenAddress": token_address,
                 "timeframe": timeframe,
             }
         }
+        print(f"[DEBUG] Nansen payload: {payload}")
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=30)
+            print(f"[DEBUG] Nansen response status: {response.status_code}")
             response.raise_for_status()
             data = response.json()
+            print(f"[DEBUG] Nansen response data: {data}")
             if isinstance(data, list) and data:
                 netflow_usd = float(data[0].get("smartTraderFlow") or 0)
                 if abs(netflow_usd) >= 1_000_000:
@@ -336,7 +348,8 @@ def get_nansen_smart_money_flows(chain: str, token_address: str) -> dict:
             else:
                 flows[label] = "N/A"
         except Exception as e:
-            flows[label] = "N/A"
+            print(f"[ERROR] Nansen API error: {e}")
+            flows[label] = f"N/A (error: {e})"
         time.sleep(0.5)  # Optional: avoid rate limits
     summary = f"Smart money flows: 24H: {flows.get('24H', 'N/A')}, 7D: {flows.get('7D', 'N/A')}, 30D: {flows.get('30D', 'N/A')}."
     return {"status": "success", "result": summary}
