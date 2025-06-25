@@ -139,19 +139,18 @@ def send_message(message: str) -> bool:
     if not st.session_state.session_id or not st.session_state.selected_agent:
         st.error("No active session. Please create a session first.")
         return False
-    
+
     # Add user message to chat
     st.session_state.messages.append({"role": "user", "content": message})
-    
-    # Prepare request payload
+
+    # Prepare A2A request payload
     payload = {
-        "app_name": st.session_state.selected_agent,
-        "user_id": st.session_state.user_id,
-        "session_id": st.session_state.session_id,
-        "new_message": {
-            "role": "user",
-            "parts": [{"text": message}]
-        }
+        "message": message,
+        "context": {
+            "user_id": st.session_state.user_id,
+            "agent": st.session_state.selected_agent
+        },
+        "session_id": st.session_state.session_id
     }
     try:
         response = requests.post(
@@ -163,52 +162,12 @@ def send_message(message: str) -> bool:
         if response.status_code != 200:
             st.error(f"Error: {response.status_code} - {response.text}")
             return False
-        events = response.json()
-        # Add all events to chat history, labeled by type
-        for event in events:
-            content = event.get("content", {})
-            role = content.get("role", "event")
-            # Tool call (function_call)
-            if "function_call" in content.get("parts", [{}])[0]:
-                call = content["parts"][0]["function_call"]
-                fn = call.get("name", "tool_call")
-                args = call.get("args", {})
-                # Markdown-only formatting
-                arg_lines = []
-                for k, v in args.items():
-                    arg_lines.append(f"    - **{k}**: `{v}`")
-                pretty_args = "\n".join(arg_lines) if arg_lines else "    - _No arguments_"
-                st.session_state.messages.append({
-                    "role": "tool_call",
-                    "content": f"🔧 **Tool Call:** `{fn}`\n{pretty_args}"
-                })
-            # Tool response (function_response)
-            elif "function_response" in content.get("parts", [{}])[0]:
-                resp = content["parts"][0]["function_response"]
-                fn = resp.get("name", "tool_response")
-                result = resp.get("response", {})
-                # Try to show only the main result if present
-                main_result = result.get("result") if isinstance(result, dict) and "result" in result else result
-                if isinstance(main_result, dict) or isinstance(main_result, list):
-                    main_result_str = json.dumps(main_result, indent=2)
-                else:
-                    main_result_str = str(main_result)
-                st.session_state.messages.append({
-                    "role": "tool_response",
-                    "content": f"🟢 **Tool Response:** `{fn}`\n{main_result_str}"
-                })
-            # Model/assistant message
-            elif role == "model" and "text" in content.get("parts", [{}])[0]:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": content["parts"][0]["text"]
-                })
-            # User message (should already be handled)
-            elif role == "user" and "text" in content.get("parts", [{}])[0]:
-                continue
-            # Other event types
-            else:
-                continue  # Hide all other event types for minimalism
+        event = response.json()
+        # Add the assistant's response to chat
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": event.get("message", "")
+        })
         return True
     except requests.exceptions.RequestException as e:
         st.error(f"Connection error: {str(e)}")
