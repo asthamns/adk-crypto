@@ -422,7 +422,7 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
             f"- {name}: {inspect.getdoc(fn) or ''}" for name, fn in tool_map.items()
         ])
 
-        # Compose the prompt
+        # Compose the prompt (stronger JSON instructions)
         prompt = f"""
 {self.instruction}
 
@@ -431,8 +431,12 @@ Available tools:
 
 User message: {message}
 
-If you need to call a tool, respond with JSON: {{"tool": "tool_name", "args": {{...}}}}
-If you have a final answer, respond with JSON: {{"answer": "your answer here"}}
+IMPORTANT:
+- You must ALWAYS respond with valid JSON.
+- If you want to call a tool, respond with: {{"tool": "tool_name", "args": {{...}}}}
+- If you have a final answer, respond with: {{"answer": "your answer here"}}
+- Never reply with plain text or any other format.
+- If you don't know the answer, still respond with {{"answer": "Sorry, I don't know."}}
 """
 
         conversation = []
@@ -442,7 +446,8 @@ If you have a final answer, respond with JSON: {{"answer": "your answer here"}}
                 content = response.text.strip()
                 data = json.loads(content)
             except Exception:
-                return {"message": f"LLM returned non-JSON: {content}", "status": "error"}
+                # Fallback: treat any plain text as a final answer
+                return {"message": response.text.strip(), "status": "success"}
             if "answer" in data:
                 return {"message": data["answer"], "status": "success"}
             elif "tool" in data:
