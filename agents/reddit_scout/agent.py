@@ -19,10 +19,10 @@ from praw.exceptions import PRAWException
 from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pathlib import Path
+import time
 
-# --- NLTK Data Path and Downloader Configuration ---
-# This ensures the required NLTK data is available and in the correct location.
-nltk_data_path = str(Path.home() / "nltk_data")
+# Use local nltk_data directory for cloud compatibility
+nltk_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nltk_data'))
 if nltk_data_path not in nltk.data.path:
     nltk.data.path.append(nltk_data_path)
 
@@ -78,17 +78,42 @@ def get_reddit_gamedev_news(subreddit: str, limit: int = 5) -> dict[str, list[st
 # ------------------------------------------------------------------------------
 # CoinGecko Tools
 # ------------------------------------------------------------------------------
+NANSEN_TO_COINGECKO_ID = {
+    "ket": "rocket-pool-eth",
+}
+
 def search_coin_id(query: str) -> Optional[str]:
-    """Searches CoinGecko for a coin ID."""
+    """Searches CoinGecko for a coin ID, with a fallback for known symbol discrepancies."""
     api_key = os.getenv("COINGECKO_API_KEY")
+
+    # Check for custom mapping first
+    if query.lower() in NANSEN_TO_COINGECKO_ID:
+        return NANSEN_TO_COINGECKO_ID[query.lower()]
+
     url = "https://pro-api.coingecko.com/api/v3/search"
     headers = {"x-cg-pro-api-key": api_key} if api_key else {}
+    
     try:
-        response = requests.get(url, params={"query": query}, headers=headers)
+        response = requests.get(url, params={"query": query}, headers=headers, timeout=15)
         response.raise_for_status()
         coins = response.json().get("coins", [])
-        return coins[0]["id"] if coins else None
-    except Exception:
+
+        if not coins:
+            return None
+
+        # Look for an exact symbol match first
+        query_lower = query.lower()
+        for coin in coins:
+            if coin.get("symbol", "").lower() == query_lower:
+                return coin.get("id")
+
+        # If no exact symbol match, return the first result (which is often a name match)
+        return coins[0].get("id")
+    except requests.exceptions.Timeout:
+        return None
+    except requests.exceptions.HTTPError as e:
+        return None
+    except requests.exceptions.RequestException as e:
         return None
 
 
@@ -120,7 +145,7 @@ def get_coin_details(coin_id: str) -> dict:
     url = f"{base_url}/coins/{coin_id}"
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         data = response.json()
 
@@ -169,6 +194,8 @@ def get_coin_details(coin_id: str) -> dict:
             "result": result_summary,
         }
 
+    except requests.exceptions.Timeout:
+        return {"status": "error", "result": "CoinGecko API timed out. Please try again later."}
     except requests.exceptions.HTTPError as e:
         return {"status": "error", "result": f"CoinGecko API error: {e.response.status_code}"}
     except requests.exceptions.RequestException as e:
@@ -278,92 +305,56 @@ def get_crypto_rumors_and_news(
 # ------------------------------------------------------------------------------
 # Nansen Tools
 # ------------------------------------------------------------------------------
-def get_token_smart_money_flow(chain: str, token_address: str) -> dict:
-    """
-    Fetches smart money flow data from Nansen for a specific TOKEN.
-    This tool is only for tokens with a contract address.
+def get_nansen_smart_money_flows(chain: str, token_address: str) -> dict:
+    api_key = os.getenv("NANSEN_API_KEY")
+    url = "https://api.nansen.ai/api/beta/tgm/flow-intelligence"
+    headers = {"apiKey": api_key, "Content-Type": "application/json"}
+    flows = {}
+    for label, timeframe in [("24H", "1d"), ("7D", "7d"), ("30D", "30d")]:
+        payload = {
+            "parameters": {
+                "chain": chain.lower(),
+                "tokenAddress": token_address,
+                "timeframe": timeframe,
+            }
+        }
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list) and data:
+                netflow_usd = float(data[0].get("smartTraderFlow") or 0)
+                if abs(netflow_usd) >= 1_000_000:
+                    flow_str = f"${netflow_usd / 1_000_000:,.2f}M"
+                elif abs(netflow_usd) >= 1_000:
+                    flow_str = f"${netflow_usd / 1_000:,.2f}K"
+                else:
+                    flow_str = f"${netflow_usd:,.2f}"
+                flows[label] = flow_str
+            else:
+                flows[label] = "N/A"
+        except Exception as e:
+            flows[label] = "N/A"
+        time.sleep(0.5)  # Optional: avoid rate limits
+    summary = f"Smart money flows: 24H: {flows.get('24H', 'N/A')}, 7D: {flows.get('7D', 'N/A')}, 30D: {flows.get('30D', 'N/A')}."
+    return {"status": "success", "result": summary}
 
-    Args:
-        chain: The blockchain name (e.g., 'solana').
-        token_address: The token's contract address.
-
-    Returns:
-        A dictionary with a summary of smart money inflows/outflows.
-    """
+def get_token_smart_money_flow(chain: str, token_address: str, symbol: Optional[str] = None) -> dict:
     if not all([chain, token_address]):
         return {"status": "error", "result": "Missing chain or token address."}
-
-    api_key = os.getenv("NANSEN_API_KEY")
-    if not api_key:
-        return {"status": "error", "result": "Nansen API key is missing."}
-
-    url = f"https://api.nansen.ai/api/v2/token-god-mode/{chain.lower()}/{token_address}/flows"
-    headers = {"apiKey": api_key}
-    
-    try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        sm_data = data.get("smart_money")
-        if not sm_data:
-            return {"status": "success", "result": "No specific smart money data found for this token."}
-
-        inflow_24h = sm_data.get("inflow", {}).get("24h_usd", 0)
-        outflow_24h = sm_data.get("outflow", {}).get("24h_usd", 0)
-        netflow_24h = inflow_24h - outflow_24h
-
-        summary = (
-            f"For this token, the 24-hour smart money net flow is ${netflow_24h:,.2f} "
-            f"(${inflow_24h:,.2f} in vs ${outflow_24h:,.2f} out)."
-        )
-        return {"status": "success", "result": summary}
-    except requests.exceptions.HTTPError as e:
-        return {"status": "error", "result": f"Nansen API returned an error: {e.response.status_code}"}
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
+    return get_nansen_smart_money_flows(chain, token_address)
 
 def get_native_asset_smart_money_flow(chain: str) -> dict:
-    """
-    Fetches smart money flow data from Nansen for a NATIVE asset (e.g., SOL, ETH).
-
-    Args:
-        chain: The blockchain name (e.g., 'solana', 'ethereum').
-
-    Returns:
-        A dictionary with a summary of smart money inflows/outflows for the chain.
-    """
     if not chain:
         return {"status": "error", "result": "Missing chain name."}
-        
-    api_key = os.getenv("NANSEN_API_KEY")
-    if not api_key:
-        return {"status": "error", "result": "Nansen API key is missing."}
-
-    url = f"https://api.nansen.ai/api/v1/smart-money-token-flows/{chain.lower()}"
-    headers = {"apiKey": api_key}
-    params = {"limit": 1}
-
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        response.raise_for_status()
-        data = response.json()
-        if not data:
-            return {"status": "success", "result": f"No chain-level smart money data found for {chain.upper()}."}
-        
-        sm_data = data[0]
-        inflow_24h = sm_data.get("inflow_24h_usd", 0)
-        outflow_24h = sm_data.get("outflow_24h_usd", 0)
-        netflow_24h = inflow_24h - outflow_24h
-
-        summary = (
-            f"For native {chain.upper()}, the 24-hour smart money net flow is ${netflow_24h:,.2f} "
-            f"(${inflow_24h:,.2f} in vs ${outflow_24h:,.2f} out)."
-        )
-        return {"status": "success", "result": summary}
-    except requests.exceptions.HTTPError as e:
-        return {"status": "error", "result": f"Nansen API returned an error: {e.response.status_code}"}
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
+    native_asset_addresses = {
+        "solana": "So11111111111111111111111111111111111111112",
+        "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+    }
+    token_address = native_asset_addresses.get(chain.lower())
+    if not token_address:
+        return {"status": "error", "result": f"Smart money flow not supported for native asset on '{chain}'."}
+    return get_nansen_smart_money_flows(chain, token_address)
 
 
 # ------------------------------------------------------------------------------
@@ -376,7 +367,7 @@ class RedditScout(Agent):
         super().__init__(
             name="reddit_scout",
             description="A crypto research assistant that combines market data with social media analysis and smart money insights.",
-    model="gemini-1.5-flash-latest",
+            model="gemini-2.5-flash",
             instruction="""
 You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident and you ALWAYS back up your sass with hard data. Follow this workflow precisely.
 
@@ -393,15 +384,15 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
 
 5.  **Synthesize Report**: Combine the results from all tools into a final summary. Give your take on what the data means in your signature style.
 """,
-    tools=[
+            tools=[
                 search_coin_id,
-        get_coin_details,
+                get_coin_details,
                 get_crypto_community_insights,
                 get_token_smart_money_flow,
                 get_native_asset_smart_money_flow,
-    ],
+            ],
             **kwargs,
-)
+        )
 
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
