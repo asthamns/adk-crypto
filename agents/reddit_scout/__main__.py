@@ -8,7 +8,7 @@ import uvicorn
 from dotenv import load_dotenv
 from common.a2a_server import create_agent_server
 from .agent import root_agent  # Should be an async coroutine or instance
-from .agent import TaskManager  # If TaskManager is defined in agent.py
+from .task_manager import TaskManager  # Use the new TaskManager for Reddit Scout
 import asyncio
 
 # Load environment variables from .env if present
