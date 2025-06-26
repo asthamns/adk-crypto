@@ -19,11 +19,8 @@ from praw.exceptions import PRAWException
 from textblob import TextBlob
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from pathlib import Path
-import time
-import google.generativeai as genai
-import json
 
-# Use local nltk_data directory for cloud compatibilityyy
+# Use local nltk_data directory for cloud compatibility
 nltk_data_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../nltk_data'))
 if nltk_data_path not in nltk.data.path:
     nltk.data.path.append(nltk_data_path)
@@ -96,18 +93,12 @@ def search_coin_id(query: str) -> Optional[str]:
     headers = {"x-cg-pro-api-key": api_key} if api_key else {}
     
     try:
-        response = requests.get(url, params={"query": query}, headers=headers, timeout=15)
+        response = requests.get(url, params={"query": query}, headers=headers)
         response.raise_for_status()
         coins = response.json().get("coins", [])
 
         if not coins:
-            # Fallback: suggest similar coins
-            similar = response.json().get("coins", [])
-            suggestions = ', '.join([c.get('symbol', '') for c in similar][:5])
-            msg = f"Sorry, I couldn't find a coin matching '{query}'."
-            if suggestions:
-                msg += f" Did you mean: {suggestions}?"
-            raise ValueError(msg)
+            return None
 
         # Look for an exact symbol match first
         query_lower = query.lower()
@@ -117,15 +108,8 @@ def search_coin_id(query: str) -> Optional[str]:
 
         # If no exact symbol match, return the first result (which is often a name match)
         return coins[0].get("id")
-    except requests.exceptions.Timeout:
+    except Exception:
         return None
-    except requests.exceptions.HTTPError as e:
-        return None
-    except requests.exceptions.RequestException as e:
-        return None
-    except ValueError as ve:
-        # Used for fallback suggestions
-        return str(ve)
 
 
 def get_coin_details(coin_id: str) -> dict:
@@ -156,7 +140,7 @@ def get_coin_details(coin_id: str) -> dict:
     url = f"{base_url}/coins/{coin_id}"
 
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers)
         response.raise_for_status()
         data = response.json()
 
@@ -205,8 +189,6 @@ def get_coin_details(coin_id: str) -> dict:
             "result": result_summary,
         }
 
-    except requests.exceptions.Timeout:
-        return {"status": "error", "result": "CoinGecko API timed out. Please try again later."}
     except requests.exceptions.HTTPError as e:
         return {"status": "error", "result": f"CoinGecko API error: {e.response.status_code}"}
     except requests.exceptions.RequestException as e:
@@ -238,10 +220,8 @@ def get_crypto_community_insights(
     coin_name: str, coin_symbol: Optional[str] = None
 ) -> dict:
     """Provides a summary of community sentiment on Twitter."""
-    print(f"[DEBUG] Sentiment called with coin_name={coin_name}, coin_symbol={coin_symbol}")
     client = get_twitter_client()
     if not client:
-        print("[ERROR] Could not initialize Twitter client. Check API credentials.")
         return {
             "status": "error",
             "result": "Could not initialize Twitter client. Please check API credentials.",
@@ -249,14 +229,12 @@ def get_crypto_community_insights(
 
     query = f'"{coin_name}" OR "{coin_symbol}"' if coin_symbol else f'"{coin_name}"'
     query += " lang:en -is:retweet"
-    print(f"[DEBUG] Twitter query: {query}")
 
     try:
         response = client.search_recent_tweets(
             query, tweet_fields=["text"], max_results=100
         )
         tweets = response.data
-        print(f"[DEBUG] Twitter response: {tweets}")
         if not tweets:
             return {
                 "status": "no_data",
@@ -280,7 +258,6 @@ def get_crypto_community_insights(
             "result": f"Overall sentiment is {assessment}. {themes_summary}",
         }
     except Exception as e:
-        print(f"[ERROR] Twitter sentiment error: {e}")
         return {
             "status": "error",
             "result": f"An unexpected error occurred. Details: {traceback.format_exc()}",
@@ -321,56 +298,96 @@ def get_crypto_rumors_and_news(
 # ------------------------------------------------------------------------------
 # Nansen Tools
 # ------------------------------------------------------------------------------
-def get_nansen_smart_money_flows(chain: str, token_address: str) -> dict:
+def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
+    """Helper to fetch and process smart money flow from Nansen using flow-intelligence."""
     api_key = os.getenv("NANSEN_API_KEY")
-    print(f"[DEBUG] Nansen called with chain={chain}, token_address={token_address}, api_key={'set' if api_key else 'missing'}")
     if not api_key:
-        print("[ERROR] Nansen API key not set.")
-        return {"status": "error", "result": "Nansen API key not set."}
+        print("[DEBUG] Nansen API key is missing.")
+        return {"status": "error", "result": "Nansen API key is missing."}
+
     url = "https://api.nansen.ai/api/beta/tgm/flow-intelligence"
     headers = {"apiKey": api_key, "Content-Type": "application/json"}
-    flows = {}
-    for label, timeframe in [("24H", "1d"), ("7D", "7d"), ("30D", "30d")]:
-        payload = {
-            "parameters": {
-                "chain": chain.lower() if chain else None,
-                "tokenAddress": token_address,
-                "timeframe": timeframe,
-            }
+    
+    payload = {
+        "parameters": {
+            "chain": chain.lower(),
+            "tokenAddress": token_address,
+            "timeframe": "1d",
         }
-        print(f"[DEBUG] Nansen payload: {payload}")
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            print(f"[DEBUG] Nansen response status: {response.status_code}")
-            response.raise_for_status()
-            data = response.json()
-            print(f"[DEBUG] Nansen response data: {data}")
-            if isinstance(data, list) and data:
-                netflow_usd = float(data[0].get("smartTraderFlow") or 0)
-                if abs(netflow_usd) >= 1_000_000:
-                    flow_str = f"${netflow_usd / 1_000_000:,.2f}M"
-                elif abs(netflow_usd) >= 1_000:
-                    flow_str = f"${netflow_usd / 1_000:,.2f}K"
-                else:
-                    flow_str = f"${netflow_usd:,.2f}"
-                flows[label] = flow_str
-            else:
-                flows[label] = "N/A"
-        except Exception as e:
-            print(f"[ERROR] Nansen API error: {e}")
-            flows[label] = f"N/A (error: {e})"
-        time.sleep(0.5)  # Optional: avoid rate limits
-    summary = f"Smart money flows: 24H: {flows.get('24H', 'N/A')}, 7D: {flows.get('7D', 'N/A')}, 30D: {flows.get('30D', 'N/A')}."
-    return {"status": "success", "result": summary}
+    }
 
-def get_token_smart_money_flow(chain: str, token_address: str, symbol: Optional[str] = None) -> dict:
+    print(f"[DEBUG] Fetching Nansen smart money flow for chain: {chain}, token_address: {token_address}")
+    print(f"[DEBUG] Payload: {payload}")
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        print(f"[DEBUG] Nansen API status code: {response.status_code}")
+        print(f"[DEBUG] Nansen API raw response: {response.text}")
+        response.raise_for_status()
+        data = response.json()
+
+        if not isinstance(data, list) or not data:
+            print("[DEBUG] No recent smart money data was found.")
+            return {"status": "success", "result": "No recent smart money data was found."}
+        
+        latest_entry = data[0]
+        
+        # Use only smartTraderFlow to match the Nansen dashboard's 24H Flows
+        netflow_usd = float(latest_entry.get("smartTraderFlow") or 0)
+
+        # Format the output string
+        if abs(netflow_usd) >= 1_000_000:
+            flow_str = f"${netflow_usd / 1_000_000:,.2f}M"
+        elif abs(netflow_usd) >= 1_000:
+            flow_str = f"${netflow_usd / 1_000:,.2f}K"
+        else:
+            flow_str = f"${netflow_usd:,.2f}"
+
+        summary = (
+            f"Over the last 24 hours, the net smart money flow was {flow_str}."
+        )
+        print(f"[DEBUG] Computed summary: {summary}")
+        return {"status": "success", "result": summary}
+
+    except requests.exceptions.HTTPError as e:
+        print(f"[DEBUG] Nansen API HTTP error: {e.response.status_code} - {e.response.text}")
+        if e.response.status_code == 404:
+            return {"status": "error", "result": "Unsupported chain or token for Nansen smart money flow."}
+        return {"status": "error", "result": f"Nansen API returned an error: {e.response.status_code} - {e.response.text}"}
+    except requests.exceptions.RequestException as e:
+        print(f"[DEBUG] Network error connecting to Nansen: {e}")
+        return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
+
+def get_token_smart_money_flow(chain: str, token_address: str) -> dict:
+    """
+    Fetches smart money flow data from Nansen for a specific TOKEN.
+    This tool is only for tokens with a contract address.
+
+    Args:
+        chain: The blockchain name (e.g., 'solana').
+        token_address: The token's contract address.
+
+    Returns:
+        A dictionary with a summary of smart money inflows/outflows.
+    """
     if not all([chain, token_address]):
         return {"status": "error", "result": "Missing chain or token address."}
-    return get_nansen_smart_money_flows(chain, token_address)
+
+    return _fetch_nansen_flow_intelligence(chain, token_address)
 
 def get_native_asset_smart_money_flow(chain: str) -> dict:
+    """
+    Fetches smart money flow data from Nansen for a NATIVE asset (e.g., SOL, ETH).
+
+    Args:
+        chain: The blockchain name (e.g., 'solana', 'ethereum').
+
+    Returns:
+        A dictionary with a summary of smart money inflows/outflows for the chain.
+    """
     if not chain:
         return {"status": "error", "result": "Missing chain name."}
+        
     native_asset_addresses = {
         "solana": "So11111111111111111111111111111111111111112",
         "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
@@ -378,7 +395,8 @@ def get_native_asset_smart_money_flow(chain: str) -> dict:
     token_address = native_asset_addresses.get(chain.lower())
     if not token_address:
         return {"status": "error", "result": f"Smart money flow not supported for native asset on '{chain}'."}
-    return get_nansen_smart_money_flows(chain, token_address)
+
+    return _fetch_nansen_flow_intelligence(chain, token_address)
 
 
 # ------------------------------------------------------------------------------
@@ -417,127 +435,6 @@ You are Naomi, a sharp-witted, Gen Z crypto market analyst. You are confident an
             ],
             **kwargs,
         )
-
-    async def process_task(self, message, context=None, session_id=None):
-        """
-        Use Gemini LLM to interpret the user message, orchestrate tool calls, and synthesize a final answer.
-        """
-        import json
-        import os
-        import inspect
-
-        # Set up Gemini
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            return {"message": "Gemini API key not set. Please set GOOGLE_API_KEY.", "status": "error"}
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(self.model)
-
-        # Prepare tool descriptions
-        tool_map = {
-            "search_coin_id": search_coin_id,
-            "get_coin_details": get_coin_details,
-            "get_crypto_community_insights": get_crypto_community_insights,
-            "get_token_smart_money_flow": get_token_smart_money_flow,
-            "get_native_asset_smart_money_flow": get_native_asset_smart_money_flow,
-        }
-        tool_desc = "\n".join([
-            f"- {name}: {inspect.getdoc(fn) or ''}" for name, fn in tool_map.items()
-        ])
-
-        # Compose the prompt (add more examples for LLM)
-        prompt = f"""
-{self.instruction}
-
-Available tools:
-{tool_desc}
-
-User message: {message}
-
-IMPORTANT:
-- You must ALWAYS respond with valid JSON.
-- If you want to call a tool, respond with: {{"tool": "tool_name", "args": {{...}}}}
-- If you have a final answer, respond with: {{"answer": "your answer here"}}
-- Never reply with plain text or any other format.
-- If you don't know the answer, still respond with {{"answer": "Sorry, I don't know."}}
-
-EXAMPLES:
-User: "Tell me about ETH"
-Response: {{"tool": "search_coin_id", "args": {{"query": "ETH"}}}}
-
-User: "Show me smart money flow for Solana"
-Response: {{"tool": "get_native_asset_smart_money_flow", "args": {{"chain": "solana"}}}}
-
-User: "What's the sentiment on Bitcoin?"
-Response: {{"tool": "get_crypto_community_insights", "args": {{"coin_name": "bitcoin"}}}}
-
-User: "Give me the details for USDT"
-Response: {{"tool": "get_coin_details", "args": {{"coin_id": "tether"}}}}
-
-User: "I want to know about a coin that doesn't exist"
-Response: {{"answer": "Sorry, I couldn't find a coin matching your query. Try using the coin's symbol (e.g., ETH, BTC) or full name."}}
-"""
-        conversation = []
-        for _ in range(5):  # Limit to 5 tool calls to avoid infinite loops
-            response = model.generate_content(prompt)
-            try:
-                content = response.text.strip()
-                data = json.loads(content)
-            except Exception:
-                final_message = extract_answer(response.text.strip())
-                return {"message": final_message, "status": "success"}
-            if "answer" in data:
-                final_message = extract_answer(data["answer"])
-                return {"message": final_message, "status": "success"}
-            elif "tool" in data:
-                tool_name = data["tool"]
-                args = data.get("args", {})
-                tool_fn = tool_map.get(tool_name)
-                if not tool_fn:
-                    return {"message": f"Unknown tool: {tool_name}", "status": "error"}
-                # --- AUTO-FILL FOR NANSEN TOOLS ---
-                if tool_name in ["get_token_smart_money_flow", "get_native_asset_smart_money_flow"]:
-                    # If missing chain or token_address, try to look up from CoinGecko
-                    if "chain" not in args or not args.get("chain") or (tool_name == "get_token_smart_money_flow" and ("token_address" not in args or not args.get("token_address"))):
-                        # Try to get coin_id from previous context or message
-                        coin_id = None
-                        if "coin_id" in args and args["coin_id"]:
-                            coin_id = args["coin_id"]
-                        else:
-                            coin_id = search_coin_id(message)
-                        coin_details = get_coin_details(coin_id) if coin_id else {}
-                        if "chain" not in args or not args.get("chain"):
-                            args["chain"] = coin_details.get("chain")
-                        if tool_name == "get_token_smart_money_flow" and ("token_address" not in args or not args.get("token_address")):
-                            args["token_address"] = coin_details.get("contract_address")
-                try:
-                    tool_result = tool_fn(**args)
-                except Exception as e:
-                    tool_result = {"status": "error", "result": str(e)}
-                prompt += f"\nTool {tool_name}({args}) returned: {tool_result}"
-            else:
-                return {"message": f"LLM returned unexpected JSON: {data}", "status": "error"}
-        return {"message": "Too many tool calls, aborting.", "status": "error"}
-
-def extract_answer(text):
-    import json
-    import re
-    # Remove leading 'json' if present
-    if text.strip().lower().startswith('json'):
-        text = text.strip()[4:].strip()
-    # Try to parse as JSON
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict) and 'answer' in data:
-            return data['answer']
-    except Exception:
-        pass
-    # Try to extract with regex
-    match = re.search(r'"answer"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.DOTALL)
-    if match:
-        return match.group(1).replace('\\n', '\n')
-    # Fallback: return the text as is, but strip leading/trailing braces and whitespace
-    return text.strip().lstrip('{').rstrip('}').strip()
 
 root_agent = RedditScout()
 agent = root_agent  # Compatibility alias
