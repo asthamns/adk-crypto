@@ -23,10 +23,16 @@ It provides market data, smart money analytics (24h, 7d, 30d), trading patterns,
     pip install -r requirements.txt
     ```
 
-3. **Run the agent:**
+3. **Run the agent in the terminal:**
     ```
     adk run reddit_scout
     ```
+
+4. **Run with the in-built Google ADK Dev UI:**
+    ```
+    adk web
+    ```
+    Then open your browser and go to [http://localhost:8000](http://localhost:8000) to use the Dev UI.
 
 ## License
 Proprietary. All rights reserved.
