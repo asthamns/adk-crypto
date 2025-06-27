@@ -298,8 +298,8 @@ def get_crypto_rumors_and_news(
 # ------------------------------------------------------------------------------
 # Nansen Tools
 # ------------------------------------------------------------------------------
-def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
-    """Helper to fetch and process smart money flow from Nansen using flow-intelligence."""
+def _fetch_nansen_flow_intelligence(chain: str, token_address: str, timeframe: str = "1d") -> dict:
+    """Helper to fetch and process smart money flow from Nansen using flow-intelligence for a given timeframe."""
     api_key = os.getenv("NANSEN_API_KEY")
     if not api_key:
         print("[DEBUG] Nansen API key is missing.")
@@ -312,11 +312,11 @@ def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
         "parameters": {
             "chain": chain.lower(),
             "tokenAddress": token_address,
-            "timeframe": "1d",
+            "timeframe": timeframe,
         }
     }
 
-    print(f"[DEBUG] Fetching Nansen smart money flow for chain: {chain}, token_address: {token_address}")
+    print(f"[DEBUG] Fetching Nansen smart money flow for chain: {chain}, token_address: {token_address}, timeframe: {timeframe}")
     print(f"[DEBUG] Payload: {payload}")
 
     try:
@@ -331,8 +331,6 @@ def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
             return {"status": "success", "result": "No recent smart money data was found."}
         
         latest_entry = data[0]
-        
-        # Use only smartTraderFlow to match the Nansen dashboard's 24H Flows
         netflow_usd = float(latest_entry.get("smartTraderFlow") or 0)
 
         # Format the output string
@@ -343,11 +341,7 @@ def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
         else:
             flow_str = f"${netflow_usd:,.2f}"
 
-        summary = (
-            f"Over the last 24 hours, the net smart money flow was {flow_str}."
-        )
-        print(f"[DEBUG] Computed summary: {summary}")
-        return {"status": "success", "result": summary}
+        return {"status": "success", "result": flow_str, "raw": latest_entry}
 
     except requests.exceptions.HTTPError as e:
         print(f"[DEBUG] Nansen API HTTP error: {e.response.status_code} - {e.response.text}")
@@ -358,22 +352,53 @@ def _fetch_nansen_flow_intelligence(chain: str, token_address: str) -> dict:
         print(f"[DEBUG] Network error connecting to Nansen: {e}")
         return {"status": "error", "result": f"Network error connecting to Nansen: {e}"}
 
+def _fetch_nansen_trading_patterns(chain: str, token_address: str) -> dict:
+    """Fetch trading patterns for a token from Nansen (example endpoint, adjust as needed)."""
+    api_key = os.getenv("NANSEN_API_KEY")
+    if not api_key:
+        return {"status": "error", "result": "Nansen API key is missing."}
+    # This endpoint is illustrative; adjust to the actual Nansen endpoint for trading patterns
+    url = f"https://api.nansen.ai/api/beta/tgm/trading-patterns"
+    headers = {"apiKey": api_key, "Content-Type": "application/json"}
+    payload = {
+        "parameters": {
+            "chain": chain.lower(),
+            "tokenAddress": token_address,
+        }
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return {"status": "success", "result": data}
+    except Exception as e:
+        return {"status": "error", "result": str(e)}
+
 def get_token_smart_money_flow(chain: str, token_address: str) -> dict:
     """
-    Fetches smart money flow data from Nansen for a specific TOKEN.
-    This tool is only for tokens with a contract address.
-
-    Args:
-        chain: The blockchain name (e.g., 'solana').
-        token_address: The token's contract address.
-
-    Returns:
-        A dictionary with a summary of smart money inflows/outflows.
+    Fetches smart money flow data from Nansen for a specific TOKEN for 24h, 7d, 30d, and trading patterns.
     """
     if not all([chain, token_address]):
         return {"status": "error", "result": "Missing chain or token address."}
 
-    return _fetch_nansen_flow_intelligence(chain, token_address)
+    timeframes = {"24h": "1d", "7d": "7d", "30d": "30d"}
+    flows = {}
+    for label, tf in timeframes.items():
+        flows[label] = _fetch_nansen_flow_intelligence(chain, token_address, tf)
+    trading_patterns = _fetch_nansen_trading_patterns(chain, token_address)
+
+    # Build summary
+    summary = []
+    for label in ["24h", "7d", "30d"]:
+        if flows[label]["status"] == "success":
+            summary.append(f"Net smart money flow ({label}): {flows[label]['result']}")
+        else:
+            summary.append(f"Net smart money flow ({label}): Error: {flows[label]['result']}")
+    if trading_patterns["status"] == "success":
+        summary.append(f"Trading patterns: {trading_patterns['result']}")
+    else:
+        summary.append(f"Trading patterns: Error: {trading_patterns['result']}")
+    return {"status": "success", "result": "\n".join(summary), "flows": flows, "trading_patterns": trading_patterns}
 
 def get_native_asset_smart_money_flow(chain: str) -> dict:
     """
